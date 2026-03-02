@@ -5,7 +5,7 @@ A lightweight, zero-dependency HTTP proxy for LLM API services
 with automatic failover, model name mapping, and configuration validation.
 """
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 import argparse
 import json
@@ -16,6 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import socket
+import time
 
 # Logging
 logging.basicConfig(
@@ -24,6 +25,11 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Circuit breaker state: {endpoint_name: {"failures": int, "last_failure": float}}
+_circuit_breaker = {}
+
+VALID_AUTH_TYPES = ("anthropic", "openai")
 
 # Default config file search paths
 DEFAULT_CONFIG_PATHS = [
@@ -143,6 +149,10 @@ def validate_config(config):
             if "api_key_env" in endpoint and not isinstance(endpoint["api_key_env"], str):
                 errors.append(f"{eid}: 'api_key_env' must be a string")
 
+            if "auth_type" in endpoint:
+                if endpoint["auth_type"] not in VALID_AUTH_TYPES:
+                    errors.append(f"{eid}: 'auth_type' must be one of {VALID_AUTH_TYPES}")
+
             if "model_mapping" in endpoint:
                 if not isinstance(endpoint["model_mapping"], dict):
                     errors.append(f"{eid}: 'model_mapping' must be an object")
@@ -239,9 +249,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             config = self.server.config
             endpoints = config.get("endpoints", [])
-            timeout = config.get("proxy", {}).get("timeout", 15)
+            proxy_config = config.get("proxy", {})
+            timeout = proxy_config.get("timeout", 15)
+            cb_threshold = proxy_config.get("circuit_breaker_threshold", 3)
+            cb_cooldown = proxy_config.get("circuit_breaker_cooldown", 60)
 
             for endpoint in endpoints:
+                name = endpoint.get("name", "unknown")
+
+                # Circuit breaker check
+                cb_state = _circuit_breaker.get(name)
+                if cb_state and cb_state["failures"] >= cb_threshold:
+                    elapsed = time.time() - cb_state["last_failure"]
+                    if elapsed < cb_cooldown:
+                        logger.debug(f"Circuit breaker open: {name} (retry in {cb_cooldown - elapsed:.0f}s)")
+                        continue
+                    logger.info(f"Circuit breaker half-open: retrying {name}")
+
                 api_key = resolve_api_key(endpoint)
                 if not api_key:
                     continue
@@ -252,11 +276,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     )
                     is_streaming = 'text/event-stream' in resp_headers.get('Content-Type', '')
                     self._send_response(response_iter, status_code, resp_headers, is_streaming)
-                    logger.info(f"Success: {endpoint['name']}{' (streaming)' if is_streaming else ''}")
+                    _circuit_breaker.pop(name, None)
+                    logger.info(f"Success: {name}{' (streaming)' if is_streaming else ''}")
                     return
 
                 except Exception as e:
-                    logger.warning(f"Failed: {endpoint['name']} - {e}")
+                    state = _circuit_breaker.setdefault(name, {"failures": 0, "last_failure": 0})
+                    state["failures"] += 1
+                    state["last_failure"] = time.time()
+                    logger.warning(f"Failed: {name} - {e} (failures: {state['failures']}/{cb_threshold})")
                     continue
 
             error_msg = json.dumps({
@@ -282,13 +310,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             pass
 
         target_url = f"{endpoint['base_url']}{self.path}"
+        auth_type = endpoint.get("auth_type", "anthropic")
 
         headers = {
             'Content-Type': self.headers.get('Content-Type', 'application/json'),
-            'x-api-key': api_key,
-            'anthropic-version': self.headers.get('anthropic-version', '2023-06-01'),
             'User-Agent': f'LLM-API-Failover-Proxy/{__version__}'
         }
+
+        if auth_type == "openai":
+            headers['Authorization'] = f'Bearer {api_key}'
+        else:
+            headers['x-api-key'] = api_key
+            headers['anthropic-version'] = self.headers.get('anthropic-version', '2023-06-01')
+            anthropic_beta = self.headers.get('anthropic-beta')
+            if anthropic_beta:
+                headers['anthropic-beta'] = anthropic_beta
 
         req = Request(target_url, data=body, headers=headers, method='POST')
         response = urlopen(req, timeout=timeout)
@@ -438,17 +474,22 @@ def main():
         httpd.config_file = config_file
         httpd.config = config
 
+        cb_threshold = proxy_config.get("circuit_breaker_threshold", 3)
+        cb_cooldown = proxy_config.get("circuit_breaker_cooldown", 60)
+
         logger.info(f"LLM API Failover Proxy v{__version__}")
         logger.info(f"Listening on http://{host}:{port}")
         logger.info(f"Endpoints: {len(config.get('endpoints', []))}")
+        logger.info(f"Circuit breaker: {cb_threshold} failures / {cb_cooldown}s cooldown")
 
         for i, endpoint in enumerate(config.get('endpoints', []), 1):
             api_key = resolve_api_key(endpoint)
             status = "OK" if api_key else "NO KEY"
-            mapping = ""
+            auth_type = endpoint.get("auth_type", "anthropic")
+            extras = f" [{auth_type}]"
             if "model_mapping" in endpoint:
-                mapping = f" (model mapping: {len(endpoint['model_mapping'])})"
-            logger.info(f"  {i}. [{status}] {endpoint['name']} - {endpoint['base_url']}{mapping}")
+                extras += f" (model mapping: {len(endpoint['model_mapping'])})"
+            logger.info(f"  {i}. [{status}] {endpoint['name']} - {endpoint['base_url']}{extras}")
 
         logger.info("Ready to accept requests")
         httpd.serve_forever()

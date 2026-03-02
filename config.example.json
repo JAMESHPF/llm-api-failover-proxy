@@ -2,7 +2,9 @@
   "proxy": {
     "host": "127.0.0.1",
     "port": 5000,
-    "timeout": 15
+    "timeout": 15,
+    "circuit_breaker_threshold": 3,
+    "circuit_breaker_cooldown": 60
   },
   "endpoints": [
     {
@@ -23,6 +25,12 @@
         "claude-opus-4-6": "claude-opus-4-6-thinking",
         "claude-sonnet-4-6": "claude-sonnet-4-6-thinking"
       }
+    },
+    {
+      "name": "OpenAI Compatible API",
+      "base_url": "https://api.openai.com",
+      "api_key_env": "OPENAI_API_KEY",
+      "auth_type": "openai"
     }
   ]
 }
