@@ -1,0 +1,28 @@
+{
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 5000,
+    "timeout": 15
+  },
+  "endpoints": [
+    {
+      "name": "Primary API",
+      "base_url": "https://api.example.com",
+      "api_key_env": "PRIMARY_API_KEY"
+    },
+    {
+      "name": "Backup API",
+      "base_url": "https://backup-api.example.com",
+      "api_key_env": "BACKUP_API_KEY"
+    },
+    {
+      "name": "API with Model Mapping",
+      "base_url": "https://custom-api.example.com",
+      "api_key_env": "CUSTOM_API_KEY",
+      "model_mapping": {
+        "claude-opus-4-6": "claude-opus-4-6-thinking",
+        "claude-sonnet-4-6": "claude-sonnet-4-6-thinking"
+      }
+    }
+  ]
+}
