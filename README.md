@@ -1,6 +1,6 @@
 # Claude Code Failover Proxy
 
-A lightweight, zero-dependency HTTP proxy for LLM API services with automatic failover, concurrent request handling, and operational monitoring.
+A lightweight, zero-dependency failover proxy designed for Claude Code. Automatically switches between multiple API endpoints with concurrent streaming, health monitoring, and smart error handling. Also works with any OpenAI-compatible LLM API.
 
 [中文文档](README_CN.md)
 

@@ -1,6 +1,6 @@
 # Claude Code 故障转移代理
 
-轻量级、零依赖的 LLM API HTTP 代理，支持自动故障转移、并发请求处理和运维监控。
+专为 Claude Code 设计的轻量级零依赖故障转移代理。在多个 API 端点之间自动切换，支持并发流式请求、健康监控和智能错误处理。同时兼容任何 OpenAI 兼容的 LLM API。
 
 [English Documentation](README.md)
 
