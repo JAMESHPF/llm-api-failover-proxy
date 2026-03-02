@@ -4,14 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
-# Change to your user
-User=root
+# Change to your user (avoid running as root)
+User=llmproxy
 # Change to the directory containing llm-api-proxy.py
-WorkingDirectory=/root
+WorkingDirectory=/home/llmproxy
 # Path to your .env file with API keys
-EnvironmentFile=/root/.llm-proxy.env
+EnvironmentFile=/home/llmproxy/.llm-proxy.env
 # Adjust paths as needed: -c specifies config file location
-ExecStart=/usr/bin/python3 /root/llm-api-proxy.py -c /root/.llm-proxy-config.json
+ExecStart=/usr/bin/python3 /home/llmproxy/llm-api-proxy.py -c /home/llmproxy/.llm-proxy-config.json
 Restart=always
 RestartSec=5
 StandardOutput=journal

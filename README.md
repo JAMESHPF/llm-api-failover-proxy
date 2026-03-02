@@ -35,8 +35,8 @@ A lightweight, zero-dependency HTTP proxy for LLM API services with automatic fa
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/JAMESHPF/llm-api-failover-proxy.git
-   cd llm-api-failover-proxy
+   git clone https://github.com/JAMESHPF/claude-code-failover-proxy.git
+   cd claude-code-failover-proxy
    ```
 
 2. **Create configuration file**

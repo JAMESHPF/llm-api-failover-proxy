@@ -5,7 +5,7 @@ A lightweight, zero-dependency HTTP proxy for LLM API services
 with automatic failover, model name mapping, and configuration validation.
 """
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 import argparse
 import json
@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _circuit_breaker = {}
 
 VALID_AUTH_TYPES = ("anthropic", "openai")
+
+# HTTP status codes that should retry the next endpoint without tripping circuit breaker
+RETRYABLE_CLIENT_ERRORS = (401, 403, 429)
 
 # Default config file search paths
 DEFAULT_CONFIG_PATHS = [
@@ -239,6 +242,15 @@ def apply_model_mapping(endpoint, body_data):
     return body_data
 
 
+def _cb_record_failure(name, threshold):
+    """Record a circuit breaker failure for the named endpoint."""
+    state = _circuit_breaker.setdefault(name, {"failures": 0, "last_failure": 0})
+    state["failures"] += 1
+    state["last_failure"] = time.time()
+    logger.warning(f"  Circuit breaker: {name} failures={state['failures']}/{threshold}")
+    return state
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     """HTTP proxy request handler."""
 
@@ -253,17 +265,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_request(self, method='POST'):
         try:
-            body = None
-            if method == 'POST':
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length)
-
             config = self.server.config
             endpoints = config.get("endpoints", [])
             proxy_config = config.get("proxy", {})
             timeout = proxy_config.get("timeout", 15)
+
+            body = None
+            if method == 'POST':
+                content_length = int(self.headers.get('Content-Length', 0))
+                max_body = proxy_config.get("max_body_size", 50 * 1024 * 1024)  # 50MB default
+                if content_length > max_body:
+                    self.send_error(413, "Request body too large")
+                    return
+                body = self.rfile.read(content_length)
             cb_threshold = proxy_config.get("circuit_breaker_threshold", 3)
             cb_cooldown = proxy_config.get("circuit_breaker_cooldown", 60)
+
+            last_error = None  # (body, status_code, headers) from last retryable error
 
             for endpoint in endpoints:
                 name = endpoint.get("name", "unknown")
@@ -291,22 +309,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     logger.info(f"Success: {name}{' (streaming)' if is_streaming else ''}")
                     return
 
-                except Exception as e:
-                    state = _circuit_breaker.setdefault(name, {"failures": 0, "last_failure": 0})
-                    state["failures"] += 1
-                    state["last_failure"] = time.time()
-                    logger.warning(f"Failed: {name} - {e} (failures: {state['failures']}/{cb_threshold})")
+                except HTTPError as e:
+                    error_body = e.read()
+                    error_headers = dict(e.headers)
+                    e.close()
+
+                    if e.code >= 500:
+                        # Server error: trip circuit breaker, try next endpoint
+                        _cb_record_failure(name, cb_threshold)
+                        last_error = (error_body, e.code, error_headers)
+                        logger.warning(f"Server error: {name} - HTTP {e.code}")
+                        continue
+
+                    elif e.code in RETRYABLE_CLIENT_ERRORS:
+                        # 401/403: auth issue (next endpoint has different key)
+                        # 429: rate limited (next endpoint may have quota)
+                        # Don't trip circuit breaker
+                        last_error = (error_body, e.code, error_headers)
+                        logger.warning(f"Retryable error: {name} - HTTP {e.code}")
+                        continue
+
+                    else:
+                        # 400/404/422 etc: client error, forward to client immediately
+                        self._send_response(error_body, e.code, error_headers)
+                        logger.warning(f"Client error via {name}: HTTP {e.code}")
+                        return
+
+                except (URLError, OSError) as e:
+                    # Connection failure: trip circuit breaker, try next endpoint
+                    _cb_record_failure(name, cb_threshold)
+                    logger.warning(f"Connection failed: {name} - {e}")
                     continue
 
-            error_msg = json.dumps({
-                "error": {
-                    "message": "All API endpoints unavailable",
-                    "type": "service_unavailable"
-                }
-            }).encode('utf-8')
-
-            self._send_response(error_msg, 503, {'Content-Type': 'application/json'})
-            logger.error("All API endpoints unavailable")
+            # All endpoints exhausted
+            if last_error:
+                err_body, err_code, err_headers = last_error
+                self._send_response(err_body, err_code, err_headers)
+                logger.error(f"All endpoints failed, returning last error: HTTP {err_code}")
+            else:
+                error_msg = json.dumps({
+                    "error": {
+                        "message": "All API endpoints unavailable",
+                        "type": "service_unavailable"
+                    }
+                }).encode('utf-8')
+                self._send_response(error_msg, 503, {'Content-Type': 'application/json'})
+                logger.error("All API endpoints unavailable")
 
         except Exception as e:
             logger.error(f"Request failed: {e}")
@@ -480,8 +528,8 @@ def main():
 
     # Apply CLI overrides
     proxy_config = config.get("proxy", {})
-    host = args.host or proxy_config.get("host", "127.0.0.1")
-    port = args.port or proxy_config.get("port", 5000)
+    host = args.host if args.host is not None else proxy_config.get("host", "127.0.0.1")
+    port = args.port if args.port is not None else proxy_config.get("port", 5000)
 
     try:
         httpd = HTTPServer((host, port), ProxyHandler)

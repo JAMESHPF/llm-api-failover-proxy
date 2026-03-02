@@ -35,8 +35,8 @@
 
 1. **克隆仓库**
    ```bash
-   git clone https://github.com/JAMESHPF/llm-api-failover-proxy.git
-   cd llm-api-failover-proxy
+   git clone https://github.com/JAMESHPF/claude-code-failover-proxy.git
+   cd claude-code-failover-proxy
    ```
 
 2. **创建配置文件**

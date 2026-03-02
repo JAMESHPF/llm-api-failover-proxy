@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-03-02
+
+### Fixed
+- Circuit breaker no longer trips on HTTP 4xx errors (endpoint is healthy, issue is client-side or auth)
+- Upstream error responses (status code + body) are now forwarded to client instead of generic 503
+- `--port 0` and `--host ""` CLI overrides no longer silently fall back to defaults
+
+### Added
+- Smart error classification: 5xx + connection errors trip circuit breaker; 401/403/429 retry next endpoint without tripping; 400/404/422 forward directly to client
+- `max_body_size` proxy config option (default 50MB) to reject oversized requests with HTTP 413
+
+### Changed
+- Systemd service file default user changed from `root` to `llmproxy` for security
+- `.env.example` instructions updated to reflect both `.env` and `~/.llm-proxy.env` load paths
+
+### Removed
+- Accidentally committed `__pycache__/` directory
+
 ## [2.5.0] - 2026-03-02
 
 ### Added
