@@ -5,7 +5,7 @@ A lightweight, zero-dependency HTTP proxy for LLM API services
 with automatic failover, model name mapping, and configuration validation.
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 import argparse
 import json
@@ -237,7 +237,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
 
-            config = load_config(self.server.config_file)
+            config = self.server.config
             endpoints = config.get("endpoints", [])
             timeout = config.get("proxy", {}).get("timeout", 15)
 
@@ -247,11 +247,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     continue
 
                 try:
-                    response_data, status_code, headers = self._forward_request(
+                    response_iter, status_code, resp_headers = self._forward_request(
                         endpoint, api_key, body, timeout
                     )
-                    self._send_response(response_data, status_code, headers)
-                    logger.info(f"Success: {endpoint['name']}")
+                    is_streaming = 'text/event-stream' in resp_headers.get('Content-Type', '')
+                    self._send_response(response_iter, status_code, resp_headers, is_streaming)
+                    logger.info(f"Success: {endpoint['name']}{' (streaming)' if is_streaming else ''}")
                     return
 
                 except Exception as e:
@@ -290,17 +291,54 @@ class ProxyHandler(BaseHTTPRequestHandler):
         }
 
         req = Request(target_url, data=body, headers=headers, method='POST')
+        response = urlopen(req, timeout=timeout)
 
-        with urlopen(req, timeout=timeout) as response:
-            return response.read(), response.status, dict(response.headers)
+        def response_iterator():
+            try:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                response.close()
 
-    def _send_response(self, data, status_code, headers):
+        return response_iterator(), response.status, dict(response.headers)
+
+    def _send_response(self, data_or_iter, status_code, headers, is_streaming=False):
         self.send_response(status_code)
         for key, value in headers.items():
-            if key.lower() not in ['connection', 'transfer-encoding']:
+            if key.lower() not in ['connection', 'content-length', 'transfer-encoding']:
                 self.send_header(key, value)
-        self.end_headers()
-        self.wfile.write(data)
+
+        if is_streaming:
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self._write_streaming(data_or_iter)
+        else:
+            data = data_or_iter if isinstance(data_or_iter, bytes) else b''.join(data_or_iter)
+            self.send_header('Content-Length', len(data))
+            self.end_headers()
+            self.wfile.write(data)
+
+    def _write_streaming(self, chunk_iterator):
+        try:
+            for chunk in chunk_iterator:
+                if not chunk:
+                    continue
+                self.wfile.write(f"{len(chunk):x}\r\n".encode())
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning(f"Client disconnected during streaming")
+        finally:
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
 
 def create_default_config(config_file):
@@ -398,6 +436,7 @@ def main():
     try:
         httpd = HTTPServer((host, port), ProxyHandler)
         httpd.config_file = config_file
+        httpd.config = config
 
         logger.info(f"LLM API Failover Proxy v{__version__}")
         logger.info(f"Listening on http://{host}:{port}")
